@@ -1,30 +1,3 @@
-import { CCCardConfig } from './types'
-
-export const CC_CARDS: CCCardConfig[] = [
-  {
-    key: 'capone', name: 'Capital One Venture', bank: 'Capital One · 1202',
-    apr: 24.40, startBalance: 4763, maxBalance: 10963, minPayment: 308,
-    color: '#f85149', deadline: null, note: 'Highest APR -- kill first',
-  },
-  {
-    key: 'citi', name: 'Costco Anywhere Visa', bank: 'Citi · 5268',
-    apr: 22.74, startBalance: 3481, maxBalance: 3481, minPayment: 41,
-    color: '#d29922', deadline: null, note: 'APR rising Jun 20 -- stop using',
-  },
-  {
-    key: 'newpromo', name: '0% Promo (New BT)', bank: 'New Card',
-    apr: 0, startBalance: 5000, maxBalance: 5000, minPayment: 50,
-    color: '#3fb950', deadline: 'Aug 2027', note: '0% promo -- expires ~Aug 2027',
-  },
-  {
-    key: 'oldpromo', name: '0% Promo (15K Card)', bank: 'Promo Card',
-    apr: 0, startBalance: 15418, maxBalance: 15418, minPayment: 175,
-    color: '#58a6ff', deadline: 'Dec 16, 2026', note: '$10,218 expires Dec 16, 2026!',
-  },
-]
-
-export const TOTAL_CC_MINIMUMS = CC_CARDS.reduce((s, c) => s + c.minPayment, 0)
-
 export const PAYOFF_TIMELINE = [
   { key: '2026-05', label: 'May 2026',  capone: 3359,  citi: 3440,  newpromo: 4950,  oldpromo: 15243 },
   { key: '2026-06', label: 'Jun 2026',  capone: 1926,  citi: 3464,  newpromo: 4900,  oldpromo: 15068 },

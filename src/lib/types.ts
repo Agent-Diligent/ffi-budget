@@ -41,15 +41,18 @@ export interface CCSnapshot {
   created_at: string
 }
 
-export interface CCCardConfig {
+export interface CCCard {
+  id: string
   key: string
   name: string
   bank: string
   apr: number
-  startBalance: number
-  maxBalance: number
-  minPayment: number
+  start_balance: number
+  balance: number
+  min_payment: number
   color: string
+  note: string | null
   deadline: string | null
-  note: string
+  sort_order: number
+  created_at?: string
 }

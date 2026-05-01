@@ -2,8 +2,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { format, addMonths, subMonths } from 'date-fns'
 import { supabase } from '@/lib/supabase'
-import { Category, Transaction, IncomeEntry } from '@/lib/types'
-import { CC_CARDS, TOTAL_CC_MINIMUMS, SOURCE_LABELS } from '@/lib/constants'
+import { Category, Transaction, IncomeEntry, CCCard } from '@/lib/types'
+import { SOURCE_LABELS } from '@/lib/constants'
 import { fmt, fmtSigned, getMonthRange, progressColor, clamp } from '@/lib/utils'
 import AddTransactionModal from '@/components/AddTransactionModal'
 
@@ -16,7 +16,7 @@ export default function Dashboard() {
   const [cats, setCats]      = useState<Category[]>([])
   const [txns, setTxns]      = useState<Transaction[]>([])
   const [income, setIncome]  = useState<IncomeEntry[]>([])
-  const [ccBals, setCcBals]  = useState<Record<string, number>>({})
+  const [ccCards, setCcCards]= useState<CCCard[]>([])
   const [loading, setLoading]= useState(true)
   const [showAdd, setShowAdd]= useState(false)
   const [showIncome, setShowIncome] = useState(false)
@@ -28,25 +28,19 @@ export default function Dashboard() {
     setLoading(true)
     const { start, end } = getMonthRange(date)
 
-    const [{ data: catData }, { data: txnData }, { data: incData }] = await Promise.all([
+    const [{ data: catData }, { data: txnData }, { data: incData }, { data: cardData }] = await Promise.all([
       supabase.from('categories').select('*').eq('is_active', true).order('sort_order'),
       supabase.from('transactions').select('*, category:categories(*)').gte('date', start).lte('date', end).order('date', { ascending: false }),
       supabase.from('income_entries').select('*').gte('date', start).lte('date', end).order('date', { ascending: false }),
+      supabase.from('cc_cards').select('*').order('sort_order'),
     ])
 
     setCats(catData || [])
     setTxns(txnData || [])
     setIncome(incData || [])
-
-    const bals: Record<string, number> = {}
-    await Promise.all(CC_CARDS.map(async card => {
-      const { data } = await supabase.from('cc_snapshots')
-        .select('balance').eq('card_key', card.key)
-        .lte('date', end).order('date', { ascending: false }).limit(1).maybeSingle()
-      bals[card.key] = data?.balance ?? card.startBalance
-    }))
-    setCcBals(bals)
-    setCcInputs(Object.fromEntries(CC_CARDS.map(c => [c.key, String(bals[c.key] ?? c.startBalance)])))
+    const loaded = cardData || []
+    setCcCards(loaded)
+    setCcInputs(Object.fromEntries(loaded.map((c: CCCard) => [c.key, String(c.balance)])))
     setLoading(false)
   }, [date])
 
@@ -62,9 +56,10 @@ export default function Dashboard() {
   const totalFixed  = fixedCats.reduce((s, c) => s + (catTotals[c.id] || 0), 0)
   const totalFood   = foodCats.reduce((s, c) => s + (catTotals[c.id] || 0), 0)
   const totalIncome = income.reduce((s, i) => s + i.amount, 0)
-  const net         = totalIncome - totalFixed - totalFood - TOTAL_CC_MINIMUMS
-  const totalDebt   = CC_CARDS.reduce((s, c) => s + (ccBals[c.key] || 0), 0)
-  const monthlyInterest = CC_CARDS.reduce((s, c) => s + (ccBals[c.key] || 0) * (c.apr / 100 / 12), 0)
+  const totalMins   = ccCards.reduce((s, c) => s + c.min_payment, 0)
+  const net         = totalIncome - totalFixed - totalFood - totalMins
+  const totalDebt   = ccCards.reduce((s, c) => s + (parseFloat(ccInputs[c.key]) || 0), 0)
+  const monthlyInterest = ccCards.reduce((s, c) => s + (parseFloat(ccInputs[c.key]) || 0) * (c.apr / 100 / 12), 0)
 
   async function saveIncome(e: React.FormEvent) {
     e.preventDefault()
@@ -83,14 +78,13 @@ export default function Dashboard() {
   async function saveCCBalances() {
     setSavingCC(true)
     const today = format(new Date(), 'yyyy-MM-dd')
-    await Promise.all(CC_CARDS.map(card =>
-      supabase.from('cc_snapshots').insert({
-        date: today,
-        card_key: card.key,
-        card_name: card.name,
-        balance: parseFloat(ccInputs[card.key]) || 0,
-      })
-    ))
+    await Promise.all(ccCards.map(card => {
+      const bal = parseFloat(ccInputs[card.key]) || 0
+      return Promise.all([
+        supabase.from('cc_snapshots').insert({ date: today, card_key: card.key, card_name: card.name, balance: bal }),
+        supabase.from('cc_cards').update({ balance: bal }).eq('id', card.id),
+      ])
+    }))
     setSavingCC(false)
     load()
   }
@@ -225,9 +219,9 @@ export default function Dashboard() {
                   </button>
                 </div>
                 <div className="p-4 space-y-4">
-                  {CC_CARDS.map(card => {
+                  {ccCards.map(card => {
                     const bal = parseFloat(ccInputs[card.key]) || 0
-                    const paid = clamp(((card.maxBalance - bal) / card.maxBalance) * 100, 0, 100)
+                    const paid = card.start_balance > 0 ? clamp(((card.start_balance - bal) / card.start_balance) * 100, 0, 100) : 0
                     return (
                       <div key={card.key}>
                         <div className="flex justify-between items-start mb-1">
@@ -256,11 +250,11 @@ export default function Dashboard() {
                   <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border text-center">
                     <div className="bg-bg rounded p-2">
                       <div className="text-xs text-text-muted">High APR</div>
-                      <div className="text-sm font-bold text-red">{fmt(CC_CARDS.filter(c=>c.apr>0).reduce((s,c)=>s+(ccBals[c.key]||0),0))}</div>
+                      <div className="text-sm font-bold text-red">{fmt(ccCards.filter(c=>c.apr>0).reduce((s,c)=>s+(parseFloat(ccInputs[c.key])||0),0))}</div>
                     </div>
                     <div className="bg-bg rounded p-2">
                       <div className="text-xs text-text-muted">0% Promo</div>
-                      <div className="text-sm font-bold text-blue">{fmt(CC_CARDS.filter(c=>c.apr===0).reduce((s,c)=>s+(ccBals[c.key]||0),0))}</div>
+                      <div className="text-sm font-bold text-blue">{fmt(ccCards.filter(c=>c.apr===0).reduce((s,c)=>s+(parseFloat(ccInputs[c.key])||0),0))}</div>
                     </div>
                     <div className="bg-bg rounded p-2">
                       <div className="text-xs text-text-muted">Interest/mo</div>
@@ -320,7 +314,7 @@ export default function Dashboard() {
           <div className={`rounded-xl p-4 flex justify-between items-center ${net >= 0 ? 'bg-green/10 border border-green/30' : 'bg-red/10 border border-red/30'}`}>
             <div>
               <div className="text-sm font-semibold text-text-primary">Monthly Net Cash Flow</div>
-              <div className="text-xs text-text-muted mt-0.5">Income ({fmt(totalIncome)}) - Fixed ({fmt(totalFixed)}) - Food ({fmt(totalFood)}) - CC Mins ({fmt(TOTAL_CC_MINIMUMS)})</div>
+              <div className="text-xs text-text-muted mt-0.5">Income ({fmt(totalIncome)}) - Fixed ({fmt(totalFixed)}) - Food ({fmt(totalFood)}) - CC Mins ({fmt(totalMins)})</div>
             </div>
             <div className={`text-3xl font-bold ${net >= 0 ? 'text-green' : 'text-red'}`}>{fmtSigned(net)}</div>
           </div>

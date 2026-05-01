@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { format, subMonths, parseISO } from 'date-fns'
 import { supabase } from '@/lib/supabase'
-import { CC_CARDS } from '@/lib/constants'
+import { CCCard } from '@/lib/types'
 import { fmt } from '@/lib/utils'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -28,6 +28,7 @@ interface CCHistory {
 export default function HistoryPage() {
   const [monthSummaries, setMonthSummaries] = useState<MonthSummary[]>([])
   const [ccHistory, setCCHistory] = useState<CCHistory[]>([])
+  const [cards, setCards] = useState<CCCard[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -44,7 +45,7 @@ export default function HistoryPage() {
         months.push({ key, label: format(d, 'MMM yy'), start, end })
       }
 
-      const [{ data: txns }, { data: income }, { data: snapshots }] = await Promise.all([
+      const [{ data: txns }, { data: income }, { data: snapshots }, { data: cardData }] = await Promise.all([
         supabase.from('transactions')
           .select('date, amount, category:categories(type)')
           .gte('date', months[0].start)
@@ -57,7 +58,10 @@ export default function HistoryPage() {
           .select('*')
           .order('date', { ascending: false })
           .limit(500),
+        supabase.from('cc_cards').select('*').order('sort_order'),
       ])
+      const loadedCards = cardData || []
+      setCards(loadedCards)
 
       // Build month summaries
       const summaries: MonthSummary[] = months.map(m => {
@@ -94,10 +98,10 @@ export default function HistoryPage() {
       const ccRows: CCHistory[] = months.map(m => {
         const row: CCHistory = { month: m.key, label: m.label }
         const data = ccByMonth[m.key]
-        CC_CARDS.forEach(c => {
+        loadedCards.forEach((c: CCCard) => {
           row[c.key] = data?.[c.key] ?? 0
         })
-        row.total = data ? CC_CARDS.reduce((s, c) => s + (data[c.key] ?? 0), 0) : 0
+        row.total = data ? loadedCards.reduce((s: number, c: CCCard) => s + (data[c.key] ?? 0), 0) : 0
         return row
       })
       setCCHistory(ccRows)
@@ -231,7 +235,7 @@ export default function HistoryPage() {
                   formatter={(v: number) => ['$' + v?.toLocaleString(), '']}
                 />
                 <Legend wrapperStyle={{ color: '#8b949e', fontSize: 12 }} />
-                {CC_CARDS.map(c => (
+                {cards.map(c => (
                   <Line key={c.key} type="monotone" dataKey={c.key} stroke={c.color}
                     strokeWidth={2} dot={{ r: 3 }} name={c.name.split(' ')[0]} connectNulls={false} />
                 ))}
