@@ -65,10 +65,10 @@ export default function HistoryPage() {
         const monthIncome = (income || []).filter(i => i.date.startsWith(m.key))
         const totalIncome = monthIncome.reduce((s, i) => s + i.amount, 0)
         const fixed = monthTxns
-          .filter(t => (t.category as { type: string } | null)?.type === 'fixed')
+          .filter(t => (t.category as unknown as { type: string } | null)?.type === 'fixed')
           .reduce((s, t) => s + t.amount, 0)
         const food = monthTxns
-          .filter(t => (t.category as { type: string } | null)?.type === 'food')
+          .filter(t => (t.category as unknown as { type: string } | null)?.type === 'food')
           .reduce((s, t) => s + t.amount, 0)
         const total = monthTxns.reduce((s, t) => s + t.amount, 0)
         return {
