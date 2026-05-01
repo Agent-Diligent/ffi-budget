@@ -1,17 +1,16 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { format, parseISO } from 'date-fns'
 import { supabase } from '@/lib/supabase'
 import { CCCard, CCSnapshot } from '@/lib/types'
-import { PAYOFF_TIMELINE, MILESTONES } from '@/lib/constants'
 import { fmt, clamp } from '@/lib/utils'
+import { calculatePayoffTimeline } from '@/lib/payoffCalculator'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   Legend, ResponsiveContainer
 } from 'recharts'
 
 const TODAY = format(new Date(), 'yyyy-MM-dd')
-const CURRENT_MONTH = format(new Date(2026, 4, 1), 'yyyy-MM')
 const COLORS = ['#f85149','#d29922','#3fb950','#58a6ff','#bc8cff','#39c5cf','#ffa657','#ff7b72']
 const BLANK = { name: '', bank: '', apr: '', balance: '', min_payment: '', color: '#58a6ff', note: '', deadline: '' }
 
@@ -19,6 +18,7 @@ export default function CCTrackerPage() {
   const [cards, setCards]         = useState<CCCard[]>([])
   const [snapshots, setSnaps]     = useState<CCSnapshot[]>([])
   const [inputs, setInputs]       = useState<Record<string, string>>({})
+  const [monthlyExtra, setMonthlyExtra] = useState(1101)
   const [saving, setSaving]       = useState(false)
   const [saved, setSaved]         = useState(false)
   const [loading, setLoading]     = useState(true)
@@ -86,7 +86,19 @@ export default function CCTrackerPage() {
     load()
   }
 
-  // Chart data (projected from original plan vs actual saved snapshots)
+  // Cards with current input values for live projection
+  const cardsWithInputs = useMemo(() =>
+    cards.map(c => ({ ...c, balance: parseFloat(inputs[c.key]) || c.balance })),
+    [cards, inputs]
+  )
+
+  // Dynamic payoff projection
+  const payoffRows = useMemo(() =>
+    calculatePayoffTimeline(cardsWithInputs, monthlyExtra, new Date(2026, 4, 1)),
+    [cardsWithInputs, monthlyExtra]
+  )
+
+  // Actual balances from snapshots by month
   const actualByMonth: Record<string, Record<string, number>> = {}
   snapshots.forEach(s => {
     const m = s.date.slice(0, 7)
@@ -94,15 +106,16 @@ export default function CCTrackerPage() {
     if (!(s.card_key in actualByMonth[m])) actualByMonth[m][s.card_key] = s.balance
   })
 
-  const chartData = PAYOFF_TIMELINE.map(row => {
-    const projected = row.capone + row.citi + row.newpromo + row.oldpromo
+  // Chart: plan vs actual total
+  const chartData = payoffRows.map(row => {
     const actuals = actualByMonth[row.key]
     const actual = actuals ? cards.reduce((s, c) => s + (actuals[c.key] ?? 0), 0) : null
-    return { month: row.label, projected, actual }
+    return { month: row.label, plan: row.total, actual }
   })
 
-  const totalDebt       = cards.reduce((s, c) => s + (parseFloat(inputs[c.key]) || 0), 0)
-  const monthlyInterest = cards.reduce((s, c) => s + (parseFloat(inputs[c.key]) || 0) * (c.apr / 100 / 12), 0)
+  const totalDebt       = cardsWithInputs.reduce((s, c) => s + c.balance, 0)
+  const monthlyInterest = cardsWithInputs.reduce((s, c) => s + c.balance * (c.apr / 100 / 12), 0)
+  const debtFreeRow     = payoffRows[payoffRows.length - 1]
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
@@ -158,7 +171,7 @@ export default function CCTrackerPage() {
               <label className="text-xs text-text-muted mb-1 block">Promo Deadline</label>
               <input type="text" value={form.deadline}
                 onChange={e => setForm(p => ({ ...p, deadline: e.target.value }))}
-                className="inp w-full" placeholder="e.g. Dec 2027" />
+                className="inp w-full" placeholder="e.g. Feb 2027" />
             </div>
             <div>
               <label className="text-xs text-text-muted mb-1 block">Note</label>
@@ -252,7 +265,7 @@ export default function CCTrackerPage() {
           </div>
 
           {/* Summary */}
-          <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
             <div className="card p-4 text-center">
               <div className="text-xs text-text-muted mb-1">Total Debt</div>
               <div className="text-2xl font-bold text-red">{fmt(totalDebt)}</div>
@@ -265,19 +278,38 @@ export default function CCTrackerPage() {
               <div className="text-xs text-text-muted mb-1">Total Minimums</div>
               <div className="text-2xl font-bold text-blue">{fmt(cards.reduce((s,c)=>s+c.min_payment,0))}</div>
             </div>
+            <div className="card p-4 text-center">
+              <div className="text-xs text-text-muted mb-1">Debt Free</div>
+              <div className="text-lg font-bold text-green">
+                {debtFreeRow ? debtFreeRow.label : '--'}
+              </div>
+            </div>
           </div>
 
-          {/* Debt paydown chart */}
+          {/* Payoff projection controls */}
           <div className="card mb-6">
             <div className="card-head">
-              <h2 className="font-semibold text-sm">Debt Paydown: Projected vs Actual</h2>
-              <span className="text-xs text-text-muted">Save balances monthly to track actual</span>
+              <h2 className="font-semibold text-sm">Debt Paydown Projection</h2>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-text-muted">Monthly extra payment:</label>
+                <span className="text-xs text-text-muted">$</span>
+                <input
+                  type="number"
+                  value={monthlyExtra}
+                  onChange={e => setMonthlyExtra(parseInt(e.target.value) || 0)}
+                  className="inp w-24 text-right text-sm"
+                  min="0"
+                  step="50"
+                />
+              </div>
             </div>
+
+            {/* Chart */}
             <div className="p-4" style={{ height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-                  <XAxis dataKey="month" tick={{ fill: '#7d8590', fontSize: 11 }} interval={2} />
+                  <XAxis dataKey="month" tick={{ fill: '#7d8590', fontSize: 11 }} interval={Math.floor(payoffRows.length / 8)} />
                   <YAxis tick={{ fill: '#7d8590', fontSize: 11 }} tickFormatter={v => '$' + (v/1000).toFixed(0) + 'K'} />
                   <Tooltip
                     contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8 }}
@@ -285,7 +317,7 @@ export default function CCTrackerPage() {
                     formatter={(v: number) => ['$' + v?.toLocaleString(), '']}
                   />
                   <Legend wrapperStyle={{ color: '#8b949e', fontSize: 12 }} />
-                  <Line type="monotone" dataKey="projected" stroke="#58a6ff" strokeDasharray="5 4" strokeWidth={2} dot={false} name="Projected" />
+                  <Line type="monotone" dataKey="plan" stroke="#58a6ff" strokeDasharray="5 4" strokeWidth={2} dot={false} name="Plan" />
                   <Line type="monotone" dataKey="actual" stroke="#3fb950" strokeWidth={2.5} dot={{ r: 4 }} connectNulls={false} name="Actual" />
                 </LineChart>
               </ResponsiveContainer>
@@ -296,43 +328,43 @@ export default function CCTrackerPage() {
           <div className="card mb-6">
             <div className="card-head">
               <h2 className="font-semibold text-sm">Month-by-Month Payoff Plan</h2>
-              <span className="text-xs text-text-muted">Original 4-card projection</span>
+              <span className="text-xs text-text-muted">Avalanche strategy -- highest APR first</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-bg text-text-muted text-xs">
                     <th className="px-4 py-3 text-left font-semibold">Month</th>
-                    <th className="px-4 py-3 text-right font-semibold">Cap One</th>
-                    <th className="px-4 py-3 text-right font-semibold">Citi</th>
-                    <th className="px-4 py-3 text-right font-semibold">6K Promo</th>
-                    <th className="px-4 py-3 text-right font-semibold">15K Promo</th>
+                    {cards.map(c => (
+                      <th key={c.key} className="px-4 py-3 text-right font-semibold">
+                        {c.name.split(' ')[0]}
+                      </th>
+                    ))}
                     <th className="px-4 py-3 text-right font-semibold">Total</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {PAYOFF_TIMELINE.map(row => {
-                    const total = row.capone + row.citi + row.newpromo + row.oldpromo
-                    const isCurrent = row.key === CURRENT_MONTH
-                    const milestone = MILESTONES[row.key]
+                  {payoffRows.map(row => {
+                    const isCurrent = row.key === format(new Date(2026, 4, 1), 'yyyy-MM')
+                    const hasMilestone = row.milestones.length > 0
                     return (
                       <tr key={row.key}
-                        className={`border-t border-muted ${isCurrent ? 'bg-blue/10' : milestone ? 'bg-green/5' : ''}`}>
+                        className={`border-t border-muted ${isCurrent ? 'bg-blue/10' : hasMilestone ? 'bg-green/5' : ''}`}>
                         <td className={`px-4 py-2.5 font-medium ${isCurrent ? 'text-blue' : 'text-text-primary'}`}>
                           {row.label}
-                          {milestone && (
-                            <span className={`ml-2 badge text-[10px] ${milestone.includes('!') ? 'badge-red' : milestone === 'DEBT FREE' ? 'badge-blue' : 'badge-green'}`}>
-                              {milestone}
+                          {row.milestones.map((m, i) => (
+                            <span key={i} className={`ml-2 badge text-[10px] ${m === 'DEBT FREE' ? 'badge-blue' : m.includes('PAID') ? 'badge-green' : 'badge-red'}`}>
+                              {m}
                             </span>
-                          )}
+                          ))}
                         </td>
-                        {[row.capone, row.citi, row.newpromo, row.oldpromo].map((v, i) => (
-                          <td key={i} className={`px-4 py-2.5 text-right ${v === 0 ? 'text-green font-bold' : 'text-text-muted'}`}>
-                            {v === 0 ? 'PAID' : fmt(v)}
+                        {cards.map(c => (
+                          <td key={c.key} className={`px-4 py-2.5 text-right ${row.balances[c.key] === 0 ? 'text-green font-bold' : 'text-text-muted'}`}>
+                            {row.balances[c.key] === 0 ? 'PAID' : fmt(row.balances[c.key])}
                           </td>
                         ))}
-                        <td className={`px-4 py-2.5 text-right font-bold ${total === 0 ? 'text-green' : 'text-text-primary'}`}>
-                          {total === 0 ? 'FREE!' : fmt(total)}
+                        <td className={`px-4 py-2.5 text-right font-bold ${row.total === 0 ? 'text-green' : 'text-text-primary'}`}>
+                          {row.total === 0 ? 'FREE!' : fmt(row.total)}
                         </td>
                       </tr>
                     )
