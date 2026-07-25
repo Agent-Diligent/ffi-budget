@@ -1,10 +1,10 @@
 'use client'
 import { useEffect, useState, useMemo } from 'react'
-import { format, parseISO } from 'date-fns'
+import { format, parseISO, differenceInCalendarDays } from 'date-fns'
 import { supabase } from '@/lib/supabase'
 import { CCCard, CCSnapshot } from '@/lib/types'
-import { fmt, clamp } from '@/lib/utils'
-import { calculatePayoffTimeline } from '@/lib/payoffCalculator'
+import { fmt, clamp, currentMonth } from '@/lib/utils'
+import { calculatePayoffTimeline, effectiveApr } from '@/lib/payoffCalculator'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   Legend, ResponsiveContainer
@@ -12,7 +12,10 @@ import {
 
 const TODAY = format(new Date(), 'yyyy-MM-dd')
 const COLORS = ['#f85149','#d29922','#3fb950','#58a6ff','#bc8cff','#39c5cf','#ffa657','#ff7b72']
-const BLANK = { name: '', bank: '', apr: '', balance: '', min_payment: '', color: '#58a6ff', note: '', deadline: '' }
+const BLANK = {
+  name: '', bank: '', apr: '', balance: '', min_payment: '',
+  color: '#58a6ff', note: '', promo_end: '', post_promo_apr: '',
+}
 
 export default function CCTrackerPage() {
   const [cards, setCards]         = useState<CCCard[]>([])
@@ -26,13 +29,20 @@ export default function CCTrackerPage() {
   const [form, setForm]           = useState({ ...BLANK })
   const [addSaving, setAddSaving] = useState(false)
   const [deleting, setDeleting]   = useState<string | null>(null)
+  const [error, setError]         = useState('')
 
   async function load() {
     setLoading(true)
-    const [{ data: cardData }, { data: snapData }] = await Promise.all([
+    setError('')
+    const [{ data: cardData, error: cardErr }, { data: snapData, error: snapErr }] = await Promise.all([
       supabase.from('cc_cards').select('*').order('sort_order'),
       supabase.from('cc_snapshots').select('*').order('date', { ascending: false }).limit(200),
     ])
+    if (cardErr || snapErr) {
+      setError((cardErr || snapErr)!.message)
+      setLoading(false)
+      return
+    }
     const loaded = cardData || []
     setCards(loaded)
     setSnaps(snapData || [])
@@ -43,15 +53,41 @@ export default function CCTrackerPage() {
   useEffect(() => { load() }, [])
 
   async function saveBalances() {
+    setError('')
+
+    // An empty field used to coerce to 0 and overwrite the real balance.
+    const blank = cards.filter(c => (inputs[c.key] ?? '').trim() === '')
+    if (blank.length > 0) {
+      setError(`Enter a balance for ${blank.map(c => c.name).join(', ')} before saving. Use 0 if the card is paid off.`)
+      return
+    }
+    const invalid = cards.filter(c => !Number.isFinite(parseFloat(inputs[c.key])) || parseFloat(inputs[c.key]) < 0)
+    if (invalid.length > 0) {
+      setError(`Balance for ${invalid.map(c => c.name).join(', ')} is not a valid amount.`)
+      return
+    }
+
     setSaving(true)
-    await Promise.all(cards.map(card => {
-      const bal = parseFloat(inputs[card.key]) || 0
-      return Promise.all([
-        supabase.from('cc_snapshots').insert({ date: TODAY, card_key: card.key, card_name: card.name, balance: bal }),
+    const results = await Promise.all(cards.map(async card => {
+      const bal = parseFloat(inputs[card.key])
+      const [snap, upd] = await Promise.all([
+        // Upsert so re-saving the same day corrects that day's snapshot
+        // instead of inserting a duplicate row.
+        supabase.from('cc_snapshots').upsert(
+          { date: TODAY, card_key: card.key, card_name: card.name, balance: bal },
+          { onConflict: 'card_key,date' }
+        ),
         supabase.from('cc_cards').update({ balance: bal }).eq('id', card.id),
       ])
+      return snap.error || upd.error
     }))
+
     setSaving(false)
+    const failed = results.find(Boolean)
+    if (failed) {
+      setError('Save failed: ' + failed.message)
+      return
+    }
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
     load()
@@ -59,20 +95,23 @@ export default function CCTrackerPage() {
 
   async function addCard(e: React.FormEvent) {
     e.preventDefault()
+    setError('')
     setAddSaving(true)
     const bal = parseFloat(form.balance) || 0
     const key = form.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
       + '_' + Date.now().toString().slice(-4)
-    await supabase.from('cc_cards').insert({
+    const { error: err } = await supabase.from('cc_cards').insert({
       key, name: form.name, bank: form.bank || '',
       apr: parseFloat(form.apr) || 0,
       start_balance: bal, balance: bal,
       min_payment: parseFloat(form.min_payment) || 25,
       color: form.color, note: form.note || '',
-      deadline: form.deadline || null,
+      promo_end: form.promo_end || null,
+      post_promo_apr: form.post_promo_apr ? parseFloat(form.post_promo_apr) : null,
       sort_order: cards.length + 1,
     })
     setAddSaving(false)
+    if (err) { setError('Could not add card: ' + err.message); return }
     setShowAdd(false)
     setForm({ ...BLANK })
     load()
@@ -80,9 +119,11 @@ export default function CCTrackerPage() {
 
   async function deleteCard(id: string) {
     if (!confirm('Delete this card? Snapshot history will be kept.')) return
+    setError('')
     setDeleting(id)
-    await supabase.from('cc_cards').delete().eq('id', id)
+    const { error: err } = await supabase.from('cc_cards').delete().eq('id', id)
     setDeleting(null)
+    if (err) { setError('Could not delete card: ' + err.message); return }
     load()
   }
 
@@ -92,11 +133,12 @@ export default function CCTrackerPage() {
     [cards, inputs]
   )
 
-  // Dynamic payoff projection
-  const payoffRows = useMemo(() =>
-    calculatePayoffTimeline(cardsWithInputs, monthlyExtra, new Date(2026, 4, 1)),
+  // Dynamic payoff projection, anchored to the real current month.
+  const payoff = useMemo(() =>
+    calculatePayoffTimeline(cardsWithInputs, monthlyExtra, currentMonth()),
     [cardsWithInputs, monthlyExtra]
   )
+  const payoffRows = payoff.rows
 
   // Actual balances from snapshots by month
   const actualByMonth: Record<string, Record<string, number>> = {}
@@ -114,8 +156,8 @@ export default function CCTrackerPage() {
   })
 
   const totalDebt       = cardsWithInputs.reduce((s, c) => s + c.balance, 0)
-  const monthlyInterest = cardsWithInputs.reduce((s, c) => s + c.balance * (c.apr / 100 / 12), 0)
-  const debtFreeRow     = payoffRows[payoffRows.length - 1]
+  const monthlyInterest = cardsWithInputs.reduce(
+    (s, c) => s + c.balance * (effectiveApr(c, currentMonth()) / 100 / 12), 0)
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
@@ -131,6 +173,12 @@ export default function CCTrackerPage() {
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="text-red text-sm bg-red/10 border border-red/30 rounded-lg px-4 py-3 mb-5">
+          {error}
+        </div>
+      )}
 
       {/* Add Card Form */}
       {showAdd && (
@@ -168,10 +216,19 @@ export default function CCTrackerPage() {
                 className="inp w-full" placeholder="25.00" />
             </div>
             <div>
-              <label className="text-xs text-text-muted mb-1 block">Promo Deadline</label>
-              <input type="text" value={form.deadline}
-                onChange={e => setForm(p => ({ ...p, deadline: e.target.value }))}
-                className="inp w-full" placeholder="e.g. Feb 2027" />
+              <label className="text-xs text-text-muted mb-1 block">Promo Ends</label>
+              <input type="date" value={form.promo_end}
+                onChange={e => setForm(p => ({ ...p, promo_end: e.target.value }))}
+                className="inp w-full" />
+            </div>
+            <div>
+              <label className="text-xs text-text-muted mb-1 block">
+                Post-Promo APR %
+                <span className="text-text-muted/60"> (rate after expiry)</span>
+              </label>
+              <input type="number" value={form.post_promo_apr} step="0.01" min="0"
+                onChange={e => setForm(p => ({ ...p, post_promo_apr: e.target.value }))}
+                className="inp w-full" placeholder="e.g. 24.99" />
             </div>
             <div>
               <label className="text-xs text-text-muted mb-1 block">Note</label>
@@ -213,20 +270,34 @@ export default function CCTrackerPage() {
               const paid = card.start_balance > 0
                 ? clamp(((card.start_balance - bal) / card.start_balance) * 100, 0, 100)
                 : 0
-              const interest = bal * (card.apr / 100 / 12)
+              const liveApr  = effectiveApr(card, currentMonth())
+              const interest = bal * (liveApr / 100 / 12)
+              // Days until the promo lapses, so an imminent expiry reads as urgent.
+              const daysLeft = card.promo_end
+                ? differenceInCalendarDays(parseISO(card.promo_end), new Date())
+                : null
               return (
                 <div key={card.key} className="card p-5">
                   <div className="flex justify-between items-start mb-3">
                     <div>
                       <div className="font-semibold text-text-primary">{card.name}</div>
                       <div className="text-xs text-text-muted mt-0.5">{card.bank}</div>
-                      <div className="text-xs mt-1">
-                        {card.apr > 0
-                          ? <span className="badge badge-red">{card.apr}% APR</span>
+                      <div className="text-xs mt-1 flex flex-wrap gap-1">
+                        {liveApr > 0
+                          ? <span className="badge badge-red">{liveApr}% APR</span>
                           : <span className="badge badge-blue">0% Promo</span>}
-                        {card.deadline && (
-                          <span className={`badge ml-1 ${card.deadline.includes('2026') ? 'badge-red' : 'badge-yellow'}`}>
-                            Expires {card.deadline}
+                        {card.promo_end && daysLeft !== null && (
+                          <span className={`badge ${
+                            daysLeft < 0 ? 'badge-red' : daysLeft < 120 ? 'badge-red' : 'badge-yellow'
+                          }`}>
+                            {daysLeft < 0
+                              ? `Promo ended ${format(parseISO(card.promo_end), 'MMM d, yyyy')}`
+                              : `Expires ${format(parseISO(card.promo_end), 'MMM d, yyyy')} (${daysLeft}d)`}
+                          </span>
+                        )}
+                        {card.promo_end && daysLeft !== null && daysLeft >= 0 && bal > 0 && card.post_promo_apr && (
+                          <span className="badge badge-yellow">
+                            then {card.post_promo_apr}%
                           </span>
                         )}
                       </div>
@@ -280,9 +351,14 @@ export default function CCTrackerPage() {
             </div>
             <div className="card p-4 text-center">
               <div className="text-xs text-text-muted mb-1">Debt Free</div>
-              <div className="text-lg font-bold text-green">
-                {debtFreeRow ? debtFreeRow.label : '--'}
+              <div className={`text-lg font-bold ${payoff.debtFreeLabel ? 'text-green' : 'text-red'}`}>
+                {payoff.debtFreeLabel ?? 'Not at this rate'}
               </div>
+              {payoff.totalInterest > 0 && (
+                <div className="text-xs text-text-muted mt-1">
+                  {fmt(payoff.totalInterest)} total interest
+                </div>
+              )}
             </div>
           </div>
 
@@ -345,7 +421,7 @@ export default function CCTrackerPage() {
                 </thead>
                 <tbody>
                   {payoffRows.map(row => {
-                    const isCurrent = row.key === format(new Date(2026, 4, 1), 'yyyy-MM')
+                    const isCurrent = row.key === format(currentMonth(), 'yyyy-MM')
                     const hasMilestone = row.milestones.length > 0
                     return (
                       <tr key={row.key}
@@ -355,6 +431,11 @@ export default function CCTrackerPage() {
                           {row.milestones.map((m, i) => (
                             <span key={i} className={`ml-2 badge text-[10px] ${m === 'DEBT FREE' ? 'badge-blue' : m.includes('PAID') ? 'badge-green' : 'badge-red'}`}>
                               {m}
+                            </span>
+                          ))}
+                          {row.promoExpired.map(name => (
+                            <span key={name} className="ml-2 badge badge-red text-[10px]">
+                              {name} promo ended
                             </span>
                           ))}
                         </td>

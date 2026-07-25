@@ -41,7 +41,9 @@ CREATE TABLE cc_snapshots (
   card_key TEXT NOT NULL,
   card_name TEXT NOT NULL,
   balance DECIMAL(10,2) NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  -- One snapshot per card per day, so re-saving updates instead of duplicating.
+  CONSTRAINT cc_snapshots_card_date_unique UNIQUE (card_key, date)
 );
 
 -- Indexes for performance
@@ -70,8 +72,18 @@ INSERT INTO categories (name, icon, type, monthly_target, sort_order) VALUES
 ('Coffee / Bakeries',      '☕', 'food',    75, 16),
 ('Food Delivery',          '📦', 'food',    50, 17);
 
--- Disable RLS (personal app -- enable and add policies if you want auth later)
-ALTER TABLE categories     DISABLE ROW LEVEL SECURITY;
-ALTER TABLE transactions   DISABLE ROW LEVEL SECURITY;
-ALTER TABLE income_entries DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cc_snapshots   DISABLE ROW LEVEL SECURITY;
+-- Row level security. The anon key ships in the browser bundle, so these tables
+-- must never be readable without a signed-in session.
+ALTER TABLE categories     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE income_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cc_snapshots   ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "authenticated_all" ON categories
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all" ON transactions
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all" ON income_entries
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all" ON cc_snapshots
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
