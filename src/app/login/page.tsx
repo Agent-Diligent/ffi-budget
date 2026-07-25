@@ -1,11 +1,10 @@
 'use client'
-import { useState, Suspense } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 
-function LoginForm() {
+export default function LoginPage() {
   const router = useRouter()
-  const params = useSearchParams()
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [error, setError]       = useState('')
@@ -24,8 +23,16 @@ function LoginForm() {
       return
     }
 
-    const next = params.get('next') || '/dashboard'
-    router.replace(next)
+    // Read ?next= straight off the URL rather than via useSearchParams, which
+    // would force this whole page to render client-side and ship an empty
+    // shell. The login form must exist in the server HTML: it is the only way
+    // into the app.
+    const next = new URLSearchParams(window.location.search).get('next')
+    // Only allow same-origin paths, so a crafted ?next= cannot bounce you to
+    // another site straight after authenticating.
+    const dest = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard'
+
+    router.replace(dest)
     router.refresh()
   }
 
@@ -66,13 +73,5 @@ function LoginForm() {
         </form>
       </div>
     </div>
-  )
-}
-
-export default function LoginPage() {
-  return (
-    <Suspense fallback={<div className="text-text-muted text-center py-20">Loading...</div>}>
-      <LoginForm />
-    </Suspense>
   )
 }
