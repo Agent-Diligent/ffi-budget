@@ -73,6 +73,25 @@ npm run test       # vitest -- payoff math, CSV parsing, categorisation
 The payoff calculator and statement parser carry the financial logic, so both
 have test coverage. Run `npm run test` before deploying a change to either.
 
+## Deployment order matters
+
+Production deploys from `main`. The auth change and the RLS migration are
+coupled, so the order below is the only one with no broken window:
+
+1. **Create the Supabase user first** (see above). Nothing else works without it.
+2. **Promote the new code.** The app now requires a login, the user exists so you
+   can sign in, and RLS is not yet enforced so data still loads.
+3. **Run migrations 002 and 003.** RLS switches on against a session that is
+   already authenticated.
+4. Set the real post-promo APRs.
+
+Two orderings to avoid:
+
+* **Migrating before deploying** leaves the old anon-only code running against
+  locked tables. Every query returns nothing and the live app looks broken.
+* **Deploying before creating the user** locks you out of your own app: every
+  route redirects to `/login` and there is no account to sign in with.
+
 ## Deployment
 
 Environment variables required (see `.env.local.example`):
