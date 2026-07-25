@@ -25,4 +25,6 @@ INSERT INTO cc_cards (key, name, bank, apr, start_balance, balance, min_payment,
 ('oldpromo', '0% Promo (15K Card)', 'Promo Card',           0.00, 15418, 15418,  175, '#58a6ff', '$10,218 expires Dec 16, 2026!',  'Dec 16, 2026', 4);
 
 ALTER TABLE cc_cards ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_all" ON cc_cards FOR ALL TO anon USING (true) WITH CHECK (true);
+-- Signed-in sessions only. Never grant this to `anon`: the anon key is public.
+CREATE POLICY "authenticated_all" ON cc_cards
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);

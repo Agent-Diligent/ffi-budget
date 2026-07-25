@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { format, subMonths, parseISO } from 'date-fns'
 import { supabase } from '@/lib/supabase'
 import { CCCard } from '@/lib/types'
-import { fmt } from '@/lib/utils'
+import { fmt, currentMonth } from '@/lib/utils'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   Legend, ResponsiveContainer, LineChart, Line
@@ -22,7 +22,9 @@ interface MonthSummary {
 interface CCHistory {
   month: string
   label: string
-  [key: string]: string | number
+  // Balances are null for months with no snapshot, so the chart gaps the line
+  // instead of drawing it down to $0.
+  [key: string]: string | number | null
 }
 
 export default function HistoryPage() {
@@ -30,22 +32,24 @@ export default function HistoryPage() {
   const [ccHistory, setCCHistory] = useState<CCHistory[]>([])
   const [cards, setCards] = useState<CCCard[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     async function load() {
       setLoading(true)
+      setError('')
 
       // Build last 12 months
       const months: { key: string; label: string; start: string; end: string }[] = []
       for (let i = 11; i >= 0; i--) {
-        const d = subMonths(new Date(2026, 4, 1), i)
+        const d = subMonths(currentMonth(), i)
         const key = format(d, 'yyyy-MM')
         const start = key + '-01'
         const end = format(new Date(d.getFullYear(), d.getMonth() + 1, 0), 'yyyy-MM-dd')
         months.push({ key, label: format(d, 'MMM yy'), start, end })
       }
 
-      const [{ data: txns }, { data: income }, { data: snapshots }, { data: cardData }] = await Promise.all([
+      const [{ data: txns, error: e1 }, { data: income, error: e2 }, { data: snapshots, error: e3 }, { data: cardData, error: e4 }] = await Promise.all([
         supabase.from('transactions')
           .select('date, amount, category:categories(type)')
           .gte('date', months[0].start)
@@ -60,6 +64,13 @@ export default function HistoryPage() {
           .limit(500),
         supabase.from('cc_cards').select('*').order('sort_order'),
       ])
+      const loadErr = e1 || e2 || e3 || e4
+      if (loadErr) {
+        setError('Could not load history: ' + loadErr.message)
+        setLoading(false)
+        return
+      }
+
       const loadedCards = cardData || []
       setCards(loadedCards)
 
@@ -99,9 +110,12 @@ export default function HistoryPage() {
         const row: CCHistory = { month: m.key, label: m.label }
         const data = ccByMonth[m.key]
         loadedCards.forEach((c: CCCard) => {
-          row[c.key] = data?.[c.key] ?? 0
+          // null, not 0. A month you did not snapshot is unknown, not paid off.
+          row[c.key] = data?.[c.key] ?? null
         })
-        row.total = data ? loadedCards.reduce((s: number, c: CCCard) => s + (data[c.key] ?? 0), 0) : 0
+        row.total = data
+          ? loadedCards.reduce((s: number, c: CCCard) => s + (data[c.key] ?? 0), 0)
+          : null
         return row
       })
       setCCHistory(ccRows)
@@ -116,7 +130,7 @@ export default function HistoryPage() {
   }
 
   const hasSpending = monthSummaries.some(m => m.total > 0)
-  const hasCC = ccHistory.some(m => (m.total as number) > 0)
+  const hasCC = ccHistory.some(m => typeof m.total === 'number' && m.total > 0)
 
   // Rolling totals
   const totalIncome  = monthSummaries.reduce((s, m) => s + m.income, 0)
@@ -132,6 +146,12 @@ export default function HistoryPage() {
         <h1 className="text-xl font-bold">History</h1>
         <p className="text-xs text-text-muted mt-1">Last 12 months</p>
       </div>
+
+      {error && (
+        <div className="text-red text-sm bg-red/10 border border-red/30 rounded-lg px-4 py-3 mb-5">
+          {error}
+        </div>
+      )}
 
       {/* Rolling KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">

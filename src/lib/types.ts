@@ -52,7 +52,10 @@ export interface CCCard {
   min_payment: number
   color: string
   note: string | null
-  deadline: string | null
+  /** ISO date the 0% promo ends. null means no promo. */
+  promo_end: string | null
+  /** APR that kicks in once promo_end passes. null falls back to `apr`. */
+  post_promo_apr: number | null
   sort_order: number
   created_at?: string
 }

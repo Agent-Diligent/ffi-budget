@@ -3,24 +3,31 @@ import { useEffect, useState, useCallback } from 'react'
 import { format, addMonths, subMonths, parseISO } from 'date-fns'
 import { supabase } from '@/lib/supabase'
 import { Category, Transaction } from '@/lib/types'
-import { fmt, getMonthRange } from '@/lib/utils'
+import { fmt, getMonthRange, currentMonth } from '@/lib/utils'
 import AddTransactionModal from '@/components/AddTransactionModal'
 
 export default function TransactionsPage() {
-  const [date, setDate]      = useState(new Date(2026, 4, 1))
+  const [date, setDate]      = useState(currentMonth)
   const [cats, setCats]      = useState<Category[]>([])
   const [txns, setTxns]      = useState<Transaction[]>([])
   const [loading, setLoading]= useState(true)
   const [showAdd, setShowAdd]= useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [error, setError]    = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError('')
     const { start, end } = getMonthRange(date)
-    const [{ data: catData }, { data: txnData }] = await Promise.all([
+    const [{ data: catData, error: e1 }, { data: txnData, error: e2 }] = await Promise.all([
       supabase.from('categories').select('*').eq('is_active', true).order('sort_order'),
       supabase.from('transactions').select('*, category:categories(*)').gte('date', start).lte('date', end).order('date', { ascending: false }),
     ])
+    if (e1 || e2) {
+      setError('Could not load transactions: ' + (e1 || e2)!.message)
+      setLoading(false)
+      return
+    }
     setCats(catData || [])
     setTxns(txnData || [])
     setLoading(false)
@@ -29,9 +36,11 @@ export default function TransactionsPage() {
   useEffect(() => { load() }, [load])
 
   async function deleteTransaction(id: string) {
+    setError('')
     setDeleting(id)
-    await supabase.from('transactions').delete().eq('id', id)
+    const { error: err } = await supabase.from('transactions').delete().eq('id', id)
     setDeleting(null)
+    if (err) { setError('Could not delete: ' + err.message); return }
     load()
   }
 
@@ -57,6 +66,12 @@ export default function TransactionsPage() {
         </div>
         <button onClick={() => setShowAdd(true)} className="btn-primary">+ Add Expense</button>
       </div>
+
+      {error && (
+        <div className="text-red text-sm bg-red/10 border border-red/30 rounded-lg px-4 py-3 mb-5">
+          {error}
+        </div>
+      )}
 
       {/* Summary bar */}
       <div className="grid grid-cols-3 gap-3 mb-5">

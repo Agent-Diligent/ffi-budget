@@ -1,18 +1,46 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
-import { format, addMonths, subMonths } from 'date-fns'
+import { format, addMonths, subMonths, parseISO, differenceInCalendarDays } from 'date-fns'
 import { supabase } from '@/lib/supabase'
 import { Category, Transaction, IncomeEntry, CCCard } from '@/lib/types'
 import { SOURCE_LABELS } from '@/lib/constants'
-import { fmt, fmtSigned, getMonthRange, progressColor, clamp } from '@/lib/utils'
+import { fmt, fmtSigned, getMonthRange, progressColor, clamp, currentMonth } from '@/lib/utils'
+import { effectiveApr } from '@/lib/payoffCalculator'
 import AddTransactionModal from '@/components/AddTransactionModal'
 
 const INCOME_TARGET = 7750
-const FOOD_TARGET   = 1325
-const FIXED_TARGET  = 4658
+
+function promoDaysLeft(card: CCCard): number | null {
+  if (!card.promo_end) return null
+  return differenceInCalendarDays(parseISO(card.promo_end), new Date())
+}
+
+function CategoryRow({ cat, actual }: { cat: Category; actual: number }) {
+  const pct = actual > 0 && cat.monthly_target > 0
+    ? clamp((actual / cat.monthly_target) * 100, 0, 120)
+    : 0
+  return (
+    <div className="py-2 border-b border-muted last:border-0">
+      <div className="grid grid-cols-[1fr_60px_80px] gap-x-3 items-center mb-1">
+        <span className="text-sm text-text-primary">{cat.icon} {cat.name}</span>
+        <span className="text-xs text-text-muted text-right">{fmt(cat.monthly_target)}</span>
+        <span className={`text-sm font-semibold text-right ${
+          actual > cat.monthly_target ? 'text-red' : actual > 0 ? 'text-green' : 'text-text-muted'
+        }`}>
+          {actual > 0 ? fmt(actual) : '--'}
+        </span>
+      </div>
+      {actual > 0 && (
+        <div className="progress-bar">
+          <div className="progress-fill" style={{ width: `${pct}%`, background: progressColor(pct) }} />
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Dashboard() {
-  const [date, setDate]      = useState(new Date(2026, 4, 1))
+  const [date, setDate]      = useState(currentMonth)
   const [cats, setCats]      = useState<Category[]>([])
   const [txns, setTxns]      = useState<Transaction[]>([])
   const [income, setIncome]  = useState<IncomeEntry[]>([])
@@ -23,17 +51,26 @@ export default function Dashboard() {
   const [incForm, setIncForm]= useState({ source: 'salary', amount: '', desc: '' })
   const [ccInputs, setCcInputs] = useState<Record<string, string>>({})
   const [savingCC, setSavingCC] = useState(false)
+  const [error, setError]       = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError('')
     const { start, end } = getMonthRange(date)
 
-    const [{ data: catData }, { data: txnData }, { data: incData }, { data: cardData }] = await Promise.all([
+    const [{ data: catData, error: e1 }, { data: txnData, error: e2 }, { data: incData, error: e3 }, { data: cardData, error: e4 }] = await Promise.all([
       supabase.from('categories').select('*').eq('is_active', true).order('sort_order'),
       supabase.from('transactions').select('*, category:categories(*)').gte('date', start).lte('date', end).order('date', { ascending: false }),
       supabase.from('income_entries').select('*').gte('date', start).lte('date', end).order('date', { ascending: false }),
       supabase.from('cc_cards').select('*').order('sort_order'),
     ])
+
+    const loadErr = e1 || e2 || e3 || e4
+    if (loadErr) {
+      setError('Could not load data: ' + loadErr.message)
+      setLoading(false)
+      return
+    }
 
     setCats(catData || [])
     setTxns(txnData || [])
@@ -55,52 +92,99 @@ export default function Dashboard() {
   const foodCats  = cats.filter(c => c.type === 'food')
   const totalFixed  = fixedCats.reduce((s, c) => s + (catTotals[c.id] || 0), 0)
   const totalFood   = foodCats.reduce((s, c) => s + (catTotals[c.id] || 0), 0)
+
+  // Derived from the categories themselves. These used to be hardcoded totals
+  // that silently drifted whenever a category target was edited.
+  const FIXED_TARGET = fixedCats.reduce((s, c) => s + c.monthly_target, 0)
+  const FOOD_TARGET  = foodCats.reduce((s, c) => s + c.monthly_target, 0)
+
   const totalIncome = income.reduce((s, i) => s + i.amount, 0)
   const totalMins   = ccCards.reduce((s, c) => s + c.min_payment, 0)
   const net         = totalIncome - totalFixed - totalFood - totalMins
   const totalDebt   = ccCards.reduce((s, c) => s + (parseFloat(ccInputs[c.key]) || 0), 0)
-  const monthlyInterest = ccCards.reduce((s, c) => s + (parseFloat(ccInputs[c.key]) || 0) * (c.apr / 100 / 12), 0)
+  const monthlyInterest = ccCards.reduce(
+    (s, c) => s + (parseFloat(ccInputs[c.key]) || 0) * (effectiveApr(c, currentMonth()) / 100 / 12), 0)
+
+  // Promos still carrying a balance when the 0% rate lapses.
+  const promoRisks = ccCards
+    .map(c => ({ card: c, days: promoDaysLeft(c), bal: parseFloat(ccInputs[c.key]) || 0 }))
+    .filter(r => r.days !== null && r.days < 180 && r.bal > 0)
+    .sort((a, b) => a.days! - b.days!)
 
   async function saveIncome(e: React.FormEvent) {
     e.preventDefault()
     if (!incForm.amount) return
-    await supabase.from('income_entries').insert({
+    setError('')
+    const { error: err } = await supabase.from('income_entries').insert({
       date: format(date, 'yyyy-MM-') + '01',
       amount: parseFloat(incForm.amount),
       source: incForm.source,
       description: incForm.desc || null,
     })
+    if (err) { setError('Could not save income: ' + err.message); return }
     setIncForm({ source: 'salary', amount: '', desc: '' })
     setShowIncome(false)
     load()
   }
 
   async function saveCCBalances() {
+    setError('')
+
+    // An empty field used to coerce to 0 and wipe the stored balance.
+    const blank = ccCards.filter(c => (ccInputs[c.key] ?? '').trim() === '')
+    if (blank.length > 0) {
+      setError(`Enter a balance for ${blank.map(c => c.name).join(', ')} before saving. Use 0 if the card is paid off.`)
+      return
+    }
+
     setSavingCC(true)
     const today = format(new Date(), 'yyyy-MM-dd')
-    await Promise.all(ccCards.map(card => {
-      const bal = parseFloat(ccInputs[card.key]) || 0
-      return Promise.all([
-        supabase.from('cc_snapshots').insert({ date: today, card_key: card.key, card_name: card.name, balance: bal }),
+    const results = await Promise.all(ccCards.map(async card => {
+      const bal = parseFloat(ccInputs[card.key])
+      if (!Number.isFinite(bal) || bal < 0) {
+        return { message: `Balance for ${card.name} is not a valid amount.` }
+      }
+      const [snap, upd] = await Promise.all([
+        supabase.from('cc_snapshots').upsert(
+          { date: today, card_key: card.key, card_name: card.name, balance: bal },
+          { onConflict: 'card_key,date' }
+        ),
         supabase.from('cc_cards').update({ balance: bal }).eq('id', card.id),
       ])
+      return snap.error || upd.error
     }))
     setSavingCC(false)
+
+    const failed = results.find(Boolean)
+    if (failed) { setError('Save failed: ' + failed.message); return }
     load()
   }
-
-  const isCurrentMonth = format(date, 'yyyy-MM') === '2026-05'
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
 
-      {/* Alert */}
-      {isCurrentMonth && (
-        <div className="bg-red/10 border border-red/40 rounded-lg px-4 py-3 mb-5 flex flex-wrap gap-x-6 gap-y-1 text-sm">
-          <span className="text-red font-bold uppercase text-xs tracking-wide">Urgent</span>
-          <span className="text-red/80"><strong className="text-red">May 12:</strong> Change Citi AutoPay to $41 min -- prevents $981 overdraft</span>
-          <span className="text-red/80"><strong className="text-red">May 22:</strong> Capital One $308 min due</span>
-          <span className="text-red/80"><strong className="text-red">This week:</strong> Submit hotel reimbursement ~$1,200</span>
+      {/* Promo expiry warnings, computed from card data rather than hardcoded. */}
+      {promoRisks.length > 0 && (
+        <div className="bg-red/10 border border-red/40 rounded-lg px-4 py-3 mb-5 text-sm">
+          <div className="flex flex-wrap gap-x-6 gap-y-1 items-center">
+            <span className="text-red font-bold uppercase text-xs tracking-wide">Promo Risk</span>
+            {promoRisks.map(r => (
+              <span key={r.card.key} className="text-red/80">
+                <strong className="text-red">{r.card.name}:</strong>{' '}
+                {r.days! < 0
+                  ? `0% ended ${Math.abs(r.days!)} days ago`
+                  : `0% ends in ${r.days} days`}
+                {' '}with {fmt(r.bal)} left
+                {r.card.post_promo_apr ? ` -- then ${r.card.post_promo_apr}% APR` : ''}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="text-red text-sm bg-red/10 border border-red/30 rounded-lg px-4 py-3 mb-5">
+          {error}
         </div>
       )}
 
@@ -149,48 +233,14 @@ export default function Dashboard() {
                 <div className="grid grid-cols-[1fr_60px_80px] gap-x-3 text-xs text-text-muted pb-2 border-b border-muted mb-1">
                   <span>Category</span><span className="text-right">Target</span><span className="text-right">Actual</span>
                 </div>
-                {fixedCats.map(cat => {
-                  const actual = catTotals[cat.id] || 0
-                  const pct = actual > 0 ? clamp((actual / cat.monthly_target) * 100, 0, 120) : 0
-                  return (
-                    <div key={cat.id} className="py-2 border-b border-muted last:border-0">
-                      <div className="grid grid-cols-[1fr_60px_80px] gap-x-3 items-center mb-1">
-                        <span className="text-sm text-text-primary">{cat.icon} {cat.name}</span>
-                        <span className="text-xs text-text-muted text-right">{fmt(cat.monthly_target)}</span>
-                        <span className={`text-sm font-semibold text-right ${actual > cat.monthly_target ? 'text-red' : actual > 0 ? 'text-green' : 'text-text-muted'}`}>
-                          {actual > 0 ? fmt(actual) : '--'}
-                        </span>
-                      </div>
-                      {actual > 0 && (
-                        <div className="progress-bar">
-                          <div className="progress-fill" style={{ width: `${pct}%`, background: progressColor(pct) }} />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
+                {fixedCats.map(cat => (
+                  <CategoryRow key={cat.id} cat={cat} actual={catTotals[cat.id] || 0} />
+                ))}
 
                 <div className="text-xs text-text-muted uppercase tracking-wide mt-4 mb-3">Food Budget</div>
-                {foodCats.map(cat => {
-                  const actual = catTotals[cat.id] || 0
-                  const pct = actual > 0 ? clamp((actual / cat.monthly_target) * 100, 0, 120) : 0
-                  return (
-                    <div key={cat.id} className="py-2 border-b border-muted last:border-0">
-                      <div className="grid grid-cols-[1fr_60px_80px] gap-x-3 items-center mb-1">
-                        <span className="text-sm text-text-primary">{cat.icon} {cat.name}</span>
-                        <span className="text-xs text-text-muted text-right">{fmt(cat.monthly_target)}</span>
-                        <span className={`text-sm font-semibold text-right ${actual > cat.monthly_target ? 'text-red' : actual > 0 ? 'text-green' : 'text-text-muted'}`}>
-                          {actual > 0 ? fmt(actual) : '--'}
-                        </span>
-                      </div>
-                      {actual > 0 && (
-                        <div className="progress-bar">
-                          <div className="progress-fill" style={{ width: `${pct}%`, background: progressColor(pct) }} />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
+                {foodCats.map(cat => (
+                  <CategoryRow key={cat.id} cat={cat} actual={catTotals[cat.id] || 0} />
+                ))}
 
                 <div className="grid grid-cols-3 gap-3 mt-4 pt-3 border-t border-border">
                   {[
@@ -240,9 +290,15 @@ export default function Dashboard() {
                         </div>
                         <div className="flex justify-between text-xs text-text-muted">
                           <span>{Math.round(paid)}% paid down</span>
-                          <span className={card.deadline === 'Dec 16, 2026' ? 'text-red font-semibold' : 'text-text-muted'}>
-                            {card.deadline ? `Expires: ${card.deadline}` : card.note}
-                          </span>
+                          {card.promo_end ? (
+                            <span className={promoDaysLeft(card)! < 120 ? 'text-red font-semibold' : 'text-yellow'}>
+                              {promoDaysLeft(card)! < 0
+                                ? `Promo ended ${format(parseISO(card.promo_end), 'MMM d, yyyy')}`
+                                : `Expires ${format(parseISO(card.promo_end), 'MMM d, yyyy')}`}
+                            </span>
+                          ) : (
+                            <span className="text-text-muted">{card.note}</span>
+                          )}
                         </div>
                       </div>
                     )
