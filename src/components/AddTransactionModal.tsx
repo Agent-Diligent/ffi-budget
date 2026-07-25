@@ -37,8 +37,9 @@ export default function AddTransactionModal({ categories, onClose, onSaved }: Pr
     onClose()
   }
 
-  const fixed = categories.filter(c => c.type === 'fixed')
-  const food  = categories.filter(c => c.type === 'food')
+  const fixed    = categories.filter(c => c.type === 'fixed')
+  const food     = categories.filter(c => c.type === 'food')
+  const variable = categories.filter(c => c.type === 'variable')
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 p-4">
@@ -73,6 +74,11 @@ export default function AddTransactionModal({ categories, onClose, onSaved }: Pr
               <optgroup label="Food">
                 {food.map(c => <option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
               </optgroup>
+              {variable.length > 0 && (
+                <optgroup label="Variable Spending">
+                  {variable.map(c => <option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+                </optgroup>
+              )}
             </select>
           </div>
 

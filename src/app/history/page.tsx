@@ -15,6 +15,7 @@ interface MonthSummary {
   income: number
   fixed: number
   food: number
+  variable: number
   total: number
   net: number
 }
@@ -79,19 +80,17 @@ export default function HistoryPage() {
         const monthTxns = (txns || []).filter(t => t.date.startsWith(m.key))
         const monthIncome = (income || []).filter(i => i.date.startsWith(m.key))
         const totalIncome = monthIncome.reduce((s, i) => s + i.amount, 0)
-        const fixed = monthTxns
-          .filter(t => (t.category as unknown as { type: string } | null)?.type === 'fixed')
-          .reduce((s, t) => s + t.amount, 0)
-        const food = monthTxns
-          .filter(t => (t.category as unknown as { type: string } | null)?.type === 'food')
+        const byType = (want: string) => monthTxns
+          .filter(t => (t.category as unknown as { type: string } | null)?.type === want)
           .reduce((s, t) => s + t.amount, 0)
         const total = monthTxns.reduce((s, t) => s + t.amount, 0)
         return {
           month: m.key,
           label: m.label,
           income: totalIncome,
-          fixed,
-          food,
+          fixed:    byType('fixed'),
+          food:     byType('food'),
+          variable: byType('variable'),
           total,
           net: totalIncome - total,
         }
@@ -177,7 +176,7 @@ export default function HistoryPage() {
       <div className="card mb-6">
         <div className="card-head">
           <h2 className="font-semibold text-sm">Monthly Spending Breakdown</h2>
-          <span className="text-xs text-text-muted">Fixed vs Food vs Other</span>
+          <span className="text-xs text-text-muted">Fixed vs Food vs Variable</span>
         </div>
         <div className="p-4" style={{ height: 280 }}>
           {hasSpending ? (
@@ -192,9 +191,9 @@ export default function HistoryPage() {
                   formatter={(v: number) => ['$' + v?.toLocaleString(), '']}
                 />
                 <Legend wrapperStyle={{ color: '#8b949e', fontSize: 12 }} />
-                <Bar dataKey="fixed" name="Fixed" stackId="a" fill="#58a6ff" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="food"  name="Food"  stackId="a" fill="#3fb950" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="total" name="Total" fill="#f85149" radius={[4, 4, 0, 0]} hide />
+                <Bar dataKey="fixed"    name="Fixed"    stackId="a" fill="#58a6ff" radius={[0, 0, 0, 0]} />
+                <Bar dataKey="food"     name="Food"     stackId="a" fill="#3fb950" radius={[0, 0, 0, 0]} />
+                <Bar dataKey="variable" name="Variable" stackId="a" fill="#bc8cff" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           ) : (
@@ -284,6 +283,7 @@ export default function HistoryPage() {
                 <th className="px-4 py-3 text-right font-semibold">Income</th>
                 <th className="px-4 py-3 text-right font-semibold">Fixed</th>
                 <th className="px-4 py-3 text-right font-semibold">Food</th>
+                <th className="px-4 py-3 text-right font-semibold">Variable</th>
                 <th className="px-4 py-3 text-right font-semibold">Total Spent</th>
                 <th className="px-4 py-3 text-right font-semibold">Net</th>
               </tr>
@@ -295,6 +295,7 @@ export default function HistoryPage() {
                   <td className="px-4 py-2.5 text-right text-green">{m.income > 0 ? fmt(m.income) : '--'}</td>
                   <td className="px-4 py-2.5 text-right text-text-muted">{m.fixed > 0 ? fmt(m.fixed) : '--'}</td>
                   <td className="px-4 py-2.5 text-right text-text-muted">{m.food > 0 ? fmt(m.food) : '--'}</td>
+                  <td className="px-4 py-2.5 text-right text-text-muted">{m.variable > 0 ? fmt(m.variable) : '--'}</td>
                   <td className="px-4 py-2.5 text-right text-red">{m.total > 0 ? fmt(m.total) : '--'}</td>
                   <td className={`px-4 py-2.5 text-right font-semibold ${
                     m.net > 0 ? 'text-green' : m.net < 0 ? 'text-red' : 'text-text-muted'

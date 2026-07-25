@@ -16,12 +16,17 @@ ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '
 -- statement you already processed inserts nothing instead of double-counting.
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS fingerprint TEXT;
 
--- Partial unique index: imported rows must be unique, manual rows are exempt
--- (you may legitimately buy the same coffee twice on the same day).
+-- Unique index so a re-imported charge is rejected rather than double counted.
+-- Deliberately NOT a partial index. Postgres cannot infer a partial index from
+-- `ON CONFLICT (fingerprint)` without repeating its WHERE clause, which
+-- PostgREST's onConflict parameter cannot express, so a partial index here
+-- makes every import fail with "no unique or exclusion constraint matching".
+-- A plain unique index is equivalent for our purposes: NULLs are distinct in
+-- Postgres unique indexes, so manual rows (fingerprint NULL) never collide and
+-- you can still buy the same coffee twice on the same day.
 DROP INDEX IF EXISTS idx_transactions_fingerprint;
 CREATE UNIQUE INDEX idx_transactions_fingerprint
-  ON transactions (fingerprint)
-  WHERE fingerprint IS NOT NULL;
+  ON transactions (fingerprint);
 
 CREATE INDEX IF NOT EXISTS idx_transactions_card_key ON transactions (card_key);
 
